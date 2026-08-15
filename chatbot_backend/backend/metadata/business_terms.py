@@ -290,6 +290,112 @@ BUSINESS_TERMS = [
     },
     {
         "term": (
+            "fast moving / slow moving / dead items / movement / movement "
+            "split / which items are moving"
+        ),
+        "meaning": (
+            "How recently a stocked item has been issued:\n"
+            "  Fast moving - issued within the last 3 months\n"
+            "  Slow moving - not in the last 3 months, but within 12\n"
+            "  Dead        - not issued in the last 12 months at all\n"
+            "Decided in that order, so every stocked item is in exactly one "
+            "class."
+        ),
+        "maps_to": (
+            "v_item_movement.movement. Counts match the inventory dashboard: "
+            "Dead 2,387, Fast 1,443, Slow 932. Windows end at the latest "
+            "issuance in the data, not at today, so a gap since the last load "
+            "cannot push live items into Dead."
+        ),
+        "notes": (
+            "REPORT COUNT AND VALUE TOGETHER. Dead is about half the "
+            "catalogue but a seventh of the money - a count alone ranks a "
+            "thousand dead washers above one dead machine, and value alone "
+            "hides how much of the catalogue is standing still.\n"
+            "'DEAD' HERE IS NOT v_dead_stock. This is the movement sense: not "
+            "issued in a year, full stop. v_dead_stock also requires stock on "
+            "hand and a purchase over a year old, so a thing bought last month "
+            "and not yet issued is not counted - 2,387 against 1,249. Use this "
+            "view for the fast/slow/dead split, v_dead_stock for money sitting "
+            "idle, and never quote one figure for the other."
+        ),
+    },
+    {
+        "term": (
+            "delayed import / late consignment / import delay / delivery delay "
+            "/ days late / on-time imports / import on-time rate"
+        ),
+        "meaning": (
+            "An import is DELAYED when it reaches the works more than 7 days "
+            "after the date it was required: eta_works minus required_date, "
+            "greater than 7 days. Arriving early, on time, or up to a week "
+            "late is ON TIME - a couple of days' slip is normal scheduling "
+            "noise, and counting it describes the shipping calendar rather "
+            "than a problem worth acting on."
+        ),
+        "maps_to": (
+            "v_import_delivery_delay(consignment_id, instrument_number, "
+            "supplier, origin, required_date, eta_works, current_status, "
+            "pkr_total, days_late, delay_status, within_grace). "
+            "delay_status is 'Delayed' / 'On time' / 'Not measurable'. Count "
+            "delay_status = 'Delayed'; average days_late over those rows only. "
+            "This is the same definition the imports dashboard uses, so the "
+            "tile and the answer agree - do not re-derive it from "
+            "consignments."
+        ),
+        "notes": (
+            "ETA WORKS, NOT PORT ARRIVAL. eta_works is arrival at the factory, "
+            "which is what the business schedules against - not eta (the port) "
+            "and not gate_out_date.\n"
+            "ALWAYS GIVE THE BASIS WITH A PERCENTAGE. A consignment missing "
+            "either date cannot be judged and is 'Not measurable' - most of "
+            "them, in fact. Say '52.6% of the 95 that can be measured', never "
+            "a bare percentage of every consignment, and never let the "
+            "unmeasurable ones count as on time, which flatters the rate.\n"
+            "days_late IS THE FULL LAG, not the excess over the 7 days: a "
+            "consignment 41 days past its required date is 41 days late. The "
+            "grace period decides WHETHER it counts as delayed, not by how "
+            "much.\n"
+            "Average days late covers DELAYED consignments only - arriving "
+            "early is not a negative delay to net off against them.\n"
+            "within_grace counts the ones that did arrive late but inside the "
+            "week, for when somebody asks how much slip is hiding inside 'on "
+            "time'."
+        ),
+    },
+    {
+        "term": (
+            "days of stock / stock days / stock runway / how long will our "
+            "stock last / how many days of stock do we have"
+        ),
+        "meaning": (
+            "How long the stock on hand would last at the rate it has been "
+            "going out, measured in MONEY: stock value divided by the value "
+            "issued per day over the last 12 months."
+        ),
+        "maps_to": (
+            "v_stock_runway, per branch. Company-wide: SUM(stock_value) / "
+            "NULLIF(SUM(issued_value_12m)/365.0, 0) - aggregate the money and "
+            "divide ONCE; never average days_of_stock across branches, which "
+            "would weight a tiny store like the main one.\n"
+            "For a NAMED ITEM use v_item_demand_picture.days_of_cover instead."
+        ),
+        "notes": (
+            "THIS IS A VALUE CALCULATION AND NEVER A QUANTITY ONE. Stock is "
+            "held in kg, pieces, litres and metres, so SUM(available_qty) adds "
+            "tonnes of scrap to a handful of drill bits, and dividing one such "
+            "sum by another compounds it. Computed that way the answer came "
+            "back as 41.9 days against a true 82.9 - not a rounding "
+            "difference. Money is the only measure that adds across a "
+            "catalogue, which is why quantity totals were removed from the "
+            "inventory dashboard as well.\n"
+            "A branch with no issuance has days_of_stock NULL: no runway is "
+            "not the same as a long one, and it must not sort as the "
+            "healthiest store."
+        ),
+    },
+    {
+        "term": (
             "dead stock / deadstock / non-moving stock / idle stock / "
             "stock not moving / stuck inventory / what is not selling"
         ),
@@ -316,6 +422,14 @@ BUSINESS_TERMS = [
             "days_since_purchase NULL means no purchase record. Purchase "
             "history starts in 2023, so those are the OLDEST holdings, not new "
             "ones. Say the age is unknown; do not imply recent.\n"
+            "'DEAD ITEMS' IS THE OTHER ONE. The inventory dashboard's tile of "
+            "that name is the MOVEMENT class - not issued in 12 months, 2,387 "
+            "items - and lives on v_item_movement. Use that for 'how many dead "
+            "items', 'dead items count', or anything asking for the fast / "
+            "slow / dead split. Use THIS view when the question is about dead "
+            "STOCK: money sitting idle, what to write off, what is stuck. If "
+            "the wording is genuinely ambiguous, give the movement figure and "
+            "say the stricter dead-stock number beside it.\n"
             "Dead stock is a WRITE-OFF, TRANSFER or USE-UP question, never a "
             "buying one. Prescriptive advice here should name the items with "
             "the most money idle and what to do with them - never suggest "
@@ -361,20 +475,47 @@ BUSINESS_TERMS = [
         ),
     },
     {
-        "term": "reorder level",
+        "term": (
+            "reorder level / below reorder level / items needing "
+            "replenishment / reorder status"
+        ),
         "meaning": (
-            "Stock level at which a replenishment should be raised, computed as "
-            "average daily consumption x (lead_time_days + safety_days)."
+            "The stock level at which an item should be replenished:\n"
+            "  (demand over the last 180 days / 180) x observed lead time x 1.2\n"
+            "An item is BELOW REORDER LEVEL when it still has stock "
+            "(available_qty above zero) but less than that level. An item at "
+            "zero is OUT OF STOCK, which is a different answer - check that "
+            "first."
         ),
         "maps_to": (
-            "issuance.quantity for the consumption rate; lead time is OBSERVED "
-            "from purchases_data (purchase - required_d)"
+            "v_item_reorder_level(item_code, reorder_level, demand_180d, "
+            "avg_lead_days, uses_default_lead, branches_with_demand), joined "
+            "to v_item_stock_position on item_code:\n"
+            "  WHERE p.available_qty > 0 AND p.available_qty < rl.reorder_level\n"
+            "That returns 105 items, the same figure as the inventory "
+            "dashboard. Do not build your own version from issuance and "
+            "purchases_data - demand comes from REQUISITIONS (what was asked "
+            "for), not from issuance (what went out), and lead time from the "
+            "requisition cycle, not from purchase dates."
         ),
         "notes": (
-            "Not stored anywhere - always calculated. There is no planning "
-            "table in this schema: the old ab_items (lead_time_days, "
-            "safety_days, ABC rank) no longer exists. Safety days have no "
-            "source at all, so say so rather than assuming a number."
+            "THE SAFETY POLICY IS THE 1.2 MULTIPLIER - a 20% buffer. An "
+            "earlier version of this note said safety days had no source and "
+            "the question could not be answered, so the assistant refused a "
+            "question the dashboard answers on screen. It is defined; use it.\n"
+            "Demand is store_requisition.req_quantity over the 180 days ending "
+            "at the LATEST requisition in the data, not at today. Lead time is "
+            "the average of (stock_in_date - prepare_date) per item and "
+            "branch, over all history, defaulting to 30 days where no cycle "
+            "has completed - uses_default_lead flags that, and is worth "
+            "mentioning when an item's level rests on the default.\n"
+            "AN ITEM MISSING FROM THE VIEW HAS NO LEVEL, NOT A LEVEL OF ZERO: "
+            "nothing was requisitioned for it in the window, so there is "
+            "nothing to be short of. Never treat absence as 'below reorder'.\n"
+            "Levels are per item AND branch and are summed for the item-wide "
+            "figure, counting only branches that actually stock it - demand "
+            "raised at a site that does not hold the item cannot make it look "
+            "short there."
         ),
     },
     {
@@ -742,12 +883,25 @@ BUSINESS_TERMS = [
         ),
         "maps_to": (
             "v_import_shafts(id, consignment_id, item_code, item_name, "
-            "shaft_type, specification, quantity, uom, unit_price, "
-            "current_status, origin, eta, etd, supplier). shaft_type already "
-            "normalises the three spellings, so GROUP BY shaft_type gives "
-            "exactly three groups.\n"
+            "shaft_type, specification, quantity, uom, unit_price, currency, "
+            "exchange_rate, line_value_pkr, current_status, origin, eta_works, "
+            "eta, etd, supplier). shaft_type already normalises the three "
+            "spellings, so GROUP BY shaft_type gives exactly three groups.\n"
             "Soft-deleted lines and consignments are already excluded, so do "
-            "NOT add is_deleted filters on top."
+            "NOT add is_deleted filters on top.\n"
+            "VALUE = SUM(line_value_pkr). NEVER quantity * unit_price: "
+            "unit_price is in the consignment's OWN CURRENCY and the rates here "
+            "run about 39-41, so the unconverted figure is roughly a fortieth "
+            "of the truth. That exact mistake reported 'PKR 7,930,196' for the "
+            "shaft lines when the real total is PKR 323,520,356 - plausible "
+            "enough that nobody questioned it. line_value_pkr is already "
+            "converted, and is NULL where the rate is missing so a short total "
+            "shows up instead of a wrong one.\n"
+            "DATE FILTER = eta_works (97.8% filled, and what the imports "
+            "dashboard uses). NEVER filter these on effective_date or po_date: "
+            "both are NULL on EVERY consignment, so a month filter on them "
+            "returns nothing and reads as 'no imports this month'. That has "
+            "already happened, hiding 24 lines worth PKR 53.6m."
         ),
         "notes": (
             "THESE LIVE ON THE IMPORT LINES, NOT IN THE ITEM MASTER. Searching "

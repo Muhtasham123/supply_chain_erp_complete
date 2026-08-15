@@ -136,7 +136,11 @@ SELECT * FROM (
 -- the name says, and if the user disagrees with the set, ask them rather than
 -- freezing a different guess into a view.
 -- ---------------------------------------------------------------------------
-CREATE OR REPLACE VIEW v_import_shafts AS
+-- Dropped rather than replaced: CREATE OR REPLACE cannot insert a column into
+-- the middle of an existing view's column list, and the currency columns belong
+-- beside unit_price where they will be seen, not appended at the end.
+DROP VIEW IF EXISTS v_import_shafts;
+CREATE VIEW v_import_shafts AS
 SELECT ci.id,
        ci.consignment_id,
        ci.item_code,
@@ -149,9 +153,35 @@ SELECT ci.id,
        ci.specification,
        ci.quantity,
        ci.unit_of_measurement            AS uom,
+
+       -- unit_price IS IN THE CONSIGNMENT'S OWN CURRENCY, NOT RUPEES.
+       -- Rates on this data run about 39-41, so a value computed without the
+       -- conversion is roughly a FORTIETH of the truth. That is exactly what
+       -- happened: an answer reported "PKR 7,930,196" for the shaft lines when
+       -- the real figure is PKR 322,797,042, and nothing looked wrong because
+       -- the number was plausible and carried a currency label.
        ci.unit_price,
+       c.currency,
+       c.exchange_rate,
+
+       -- USE THIS FOR ANY VALUE QUESTION. Pre-multiplied so the conversion
+       -- cannot be forgotten, and NULL rather than wrong when the rate is
+       -- missing (about 10% of consignments have no rate) - a missing row is
+       -- visible in a total, a silently unconverted one is not.
+       (ci.quantity * ci.unit_price * c.exchange_rate) AS line_value_pkr,
+
        c.current_status,
        c.origin,
+
+       -- THE DATE TO FILTER ON IS eta_works (97.8% filled), which is what the
+       -- imports dashboard uses. eta and etd are 90.4% filled and answer a
+       -- different question (port arrival / sailing).
+       -- DO NOT filter these lines on consignments.effective_date or po_date:
+       -- both are NULL on every single consignment, so any month or year filter
+       -- using them returns zero rows and reads as "nothing was imported".
+       -- An answer of "no shaft imports this month" was produced exactly that
+       -- way, while 24 lines worth PKR 53.6m sat in the period.
+       c.eta_works,
        c.eta,
        c.etd,
        s.name                            AS supplier
@@ -164,6 +194,63 @@ LEFT JOIN suppliers AS s
 WHERE ci.is_deleted = false
   AND ci.item_name ~* '[[:<:]]forged[[:>:]]'
   AND ci.item_name ~* '[[:<:]]bars?[[:>:]]';
+
+
+-- ---------------------------------------------------------------------------
+-- v_import_delivery_delay - was an import late, per the business definition
+--
+-- DELAY = eta_works - required_date, in days. MORE THAN 7 DAYS LATE IS DELAYED;
+-- anything from arriving early up to a week late is ON TIME.
+--
+-- The seven days are deliberate, not a fudge: a couple of days' slip is normal
+-- scheduling noise, and counting it made the figure describe the shipping
+-- calendar instead of a problem worth acting on. This matches the imports
+-- dashboard exactly, so the tile and the chatbot cannot disagree.
+--
+-- ETA WORKS, NOT PORT ARRIVAL. eta_works is arrival at the factory, which is
+-- the date the business schedules against - not eta (the port) and not
+-- gate_out_date.
+--
+-- NOT MEASURABLE IS ITS OWN ANSWER. A consignment missing either date cannot be
+-- judged late or on time, and must not be quietly counted as on time - that is
+-- how a delay rate gets flattered. 79 of 178 consignments are in this state, so
+-- the basis travels with any percentage: say "52.6% of the 95 that can be
+-- measured", never a bare percentage of everything.
+--
+-- days_late IS THE FULL LAG, not the excess over the grace period - a
+-- consignment 41 days past its required date is 41 days late, and the 7 days
+-- decide only WHETHER it counts, not by how much. Average days late covers the
+-- DELAYED ones only: arriving early is not a negative delay to net off against
+-- them.
+-- ---------------------------------------------------------------------------
+CREATE OR REPLACE VIEW v_import_delivery_delay AS
+SELECT c.id                                   AS consignment_id,
+       c.instrument_number,
+       s.name                                 AS supplier,
+       c.origin,
+       c.required_date,
+       c.eta_works,
+       c.current_status,
+       c.pkr_total,
+
+       (c.eta_works - c.required_date)        AS days_late,
+
+       CASE
+           WHEN c.required_date IS NULL OR c.eta_works IS NULL THEN 'Not measurable'
+           WHEN (c.eta_works - c.required_date) > 7            THEN 'Delayed'
+           ELSE 'On time'
+       END                                    AS delay_status,
+
+       -- Arrived after the required date but inside the week of grace: on time,
+       -- and worth being able to count separately when somebody asks how much
+       -- slip is hiding inside "on time".
+       (c.required_date IS NOT NULL
+        AND c.eta_works IS NOT NULL
+        AND (c.eta_works - c.required_date) > 0
+        AND (c.eta_works - c.required_date) <= 7) AS within_grace
+FROM consignments AS c
+LEFT JOIN suppliers AS s ON s.id = c.supplier_id
+WHERE c.is_deleted = false;
 
 
 -- ---------------------------------------------------------------------------
@@ -217,6 +304,7 @@ WHERE lower(trim(i.name)) IN (
 -- Dropped rather than replaced: CREATE OR REPLACE cannot add a column to
 -- an existing view, and the dependent views are rebuilt below anyway.
 DROP VIEW IF EXISTS v_item_demand_picture;
+DROP VIEW IF EXISTS v_item_movement;
 DROP VIEW IF EXISTS v_dead_stock;
 DROP VIEW IF EXISTS v_branch_depleted_items;
 DROP VIEW IF EXISTS v_out_of_stock_by_branch;
@@ -419,6 +507,267 @@ LEFT JOIN last_purchase AS lp ON lp.item_code = pos.item_code
 WHERE pos.available_qty > 0
   AND (li.last_issued_on IS NULL OR li.last_issued_on < CURRENT_DATE - 365)
   AND (lp.last_purchased_on IS NULL OR lp.last_purchased_on < CURRENT_DATE - 365);
+
+
+-- ---------------------------------------------------------------------------
+-- v_item_movement - fast / slow / dead, the inventory dashboard's split
+--
+--   Fast moving  issued within the last 3 months
+--   Slow moving  not issued in the last 3 months, but issued in the last 12
+--   Dead         not issued in the last 12 months at all
+--
+-- One class per item, decided in that order, so every stocked item lands in
+-- exactly one bucket. The windows end at the LATEST ISSUANCE IN THE DATA, not
+-- at today, so a gap since the last load cannot push live items into "dead".
+--
+-- NOTE ON THE WORD "DEAD". This is the MOVEMENT sense - purely "has not been
+-- issued in a year". v_dead_stock is stricter: it also requires stock on hand
+-- and a purchase more than a year old, so that a thing bought last month and
+-- not yet issued is not called dead. The two answer different questions and
+-- give different counts; use this view when the question is about the fast /
+-- slow / dead SPLIT, and v_dead_stock when it is about money sitting idle.
+-- ---------------------------------------------------------------------------
+-- TWO DETAILS THAT DECIDE THE NUMBERS, both taken from the dashboard so the
+-- split matches it exactly (Dead 2,387 / Fast 1,443 / Slow 932):
+--
+--  * ISSUANCE COUNTS ONLY WHERE THE BRANCH STOCKS THE ITEM. Issuance is keyed
+--    by item AND branch and joined to the stock rows; material issued at a
+--    site that does not hold the item does not make it "moving" there. Ignore
+--    this and 2,387 becomes 2,181.
+--
+--  * EVERY ISSUANCE STATUS COUNTS HERE, not just 'Issue'. That is the
+--    dashboard's rule and it is the ONE PLACE in this file where Hold and
+--    HoldIssuence are treated as movement - v_item_consumption_monthly and
+--    v_stock_runway both count 'Issue' alone, because a reservation is not
+--    consumption. Kept deliberately so the tile and the answer agree; on
+--    'Issue' alone this split would read 2,403 / 1,395 / 964.
+CREATE OR REPLACE VIEW v_item_movement AS
+WITH win AS (
+    SELECT MAX(from_date)       AS data_through,
+           MAX(from_date) - 92  AS from_3m,
+           MAX(from_date) - 365 AS from_12m
+    FROM issuance
+),
+activity AS (
+    SELECT i.item_code,
+           i.branch,
+           MAX(i.from_date) AS last_issued_on,
+           SUM(COALESCE(i.total_price, 0))
+             FILTER (WHERE i.from_date >= (SELECT from_3m FROM win))  AS issued_value_3m,
+           SUM(COALESCE(i.total_price, 0))
+             FILTER (WHERE i.from_date >= (SELECT from_12m FROM win)) AS issued_value_12m
+    FROM issuance AS i, win AS w
+    WHERE i.from_date BETWEEN w.from_12m AND w.data_through
+    GROUP BY i.item_code, i.branch
+),
+per_item AS (
+    SELECT s.item_code,
+           MAX(a.last_issued_on)                  AS last_issued_on,
+           SUM(COALESCE(a.issued_value_3m, 0))    AS issued_value_3m,
+           SUM(COALESCE(a.issued_value_12m, 0))   AS issued_value_12m
+    FROM stock AS s
+    LEFT JOIN activity AS a
+           ON a.item_code = s.item_code
+          AND a.branch    = s.branch
+    GROUP BY s.item_code
+)
+SELECT p.item_code,
+       p.item_name,
+       p.rank,
+       p.available_qty,
+       p.stock_amount                 AS stock_value,
+       p.available_amount,
+       m.last_issued_on,
+       m.issued_value_3m,
+       m.issued_value_12m,
+       CASE
+           WHEN m.issued_value_3m  > 0 THEN 'Fast moving'
+           WHEN m.issued_value_12m > 0 THEN 'Slow moving'
+           ELSE 'Dead'
+       END                            AS movement,
+       (SELECT data_through FROM win) AS data_through
+FROM v_item_stock_position AS p
+JOIN per_item AS m ON m.item_code = p.item_code;
+
+
+-- ---------------------------------------------------------------------------
+-- v_item_reorder_level - the level below which an item needs replenishing
+--
+-- THE COMPANY'S DEFINITION, the same one the inventory dashboard uses:
+--
+--     reorder level = (demand over the last 180 days / 180)
+--                     x observed lead time
+--                     x 1.2                       (a 20% safety buffer)
+--
+-- DEMAND comes from store_requisition.req_quantity - what departments actually
+-- ASKED FOR - over the 180 days ending at the latest requisition in the data,
+-- not at today, so a gap since the last load cannot silently shrink it.
+--
+-- LEAD TIME is observed per item AND branch: the average of
+-- (stock_in_date - prepare_date) over every completed requisition cycle, using
+-- ALL history rather than the 180-day window, because a slow-moving item may
+-- have only one or two completed cycles ever. 30 days is the fallback where
+-- there is no completed cycle at all.
+--
+-- SUMMED ACROSS BRANCHES for the item-level threshold: an item needs cover at
+-- every branch that stocks it, so the business-wide level is the sum of the
+-- per-branch levels, matching group_by_item in the dashboard.
+--
+-- THIS IS NOT "no reorder level is stored". It is derived, it is defined, and
+-- the answer to "how many items are below reorder level" is 105 - refusing the
+-- question because safety days are not recorded was wrong: the 20% buffer IS
+-- the safety policy.
+--
+-- Items with NO demand in the window have NO reorder level and are absent from
+-- this view. Nothing was asked for, so there is nothing to be short of; do not
+-- read a missing row as a level of zero.
+-- ---------------------------------------------------------------------------
+CREATE OR REPLACE VIEW v_item_reorder_level AS
+WITH win AS (
+    SELECT MAX(prepare_date)       AS latest,
+           MAX(prepare_date) - 180 AS win_start
+    FROM store_requisition
+),
+demand AS (
+    SELECT sr.item_code,
+           sr.branch,
+           SUM(COALESCE(sr.req_quantity, 0)) AS demand_qty
+    FROM store_requisition AS sr, win AS w
+    WHERE sr.prepare_date BETWEEN w.win_start AND w.latest
+    GROUP BY sr.item_code, sr.branch
+),
+lead AS (
+    -- Every completed prepare -> stock-in cycle, not just those in the window.
+    SELECT sr.item_code,
+           sr.branch,
+           AVG(sr.stock_in_date - sr.prepare_date)::numeric AS lead_days
+    FROM store_requisition AS sr
+    WHERE sr.prepare_date IS NOT NULL
+      AND sr.stock_in_date IS NOT NULL
+      AND sr.stock_in_date >= sr.prepare_date
+    GROUP BY sr.item_code, sr.branch
+),
+per_branch AS (
+    SELECT d.item_code,
+           d.branch,
+           (d.demand_qty / 180.0)
+             * COALESCE(l.lead_days, 30)
+             * 1.2                            AS reorder_level,
+           d.demand_qty,
+           COALESCE(l.lead_days, 30)          AS lead_days,
+           (l.lead_days IS NULL)              AS lead_is_default
+    FROM demand AS d
+    LEFT JOIN lead AS l
+           ON l.item_code = d.item_code
+          AND l.branch    = d.branch
+    WHERE d.demand_qty > 0
+      -- ONLY WHERE THE BRANCH ACTUALLY STOCKS THE ITEM. Requisitions come from
+      -- seven branches, stock is held at four, and a level is a threshold for
+      -- a store that holds the thing - demand raised at a site that does not
+      -- stock it cannot make the stock there look short. The dashboard gets
+      -- this for free by attaching levels to stock rows; stated explicitly
+      -- here it is the difference between 175 items "below reorder" and 105.
+      AND EXISTS (
+          SELECT 1 FROM stock AS s
+          WHERE s.item_code = d.item_code
+            AND s.branch    = d.branch
+      )
+),
+-- THE STORED COLUMN IS THE FALLBACK, per item and branch, exactly as the
+-- dashboard does it: a computed level if there was demand in the window,
+-- otherwise whatever stock.reorder_level holds. Doing it here rather than
+-- leaving it to the caller means no caller can forget - an item with no
+-- requisitions would otherwise look as though it had no threshold when the
+-- store has one on file.
+--
+-- NOTE FOR THIS DATABASE: stock.reorder_level is currently NULL on all 6,070
+-- rows, because the loader does not read the workbook's "Reorder Level"
+-- column (1,186 source rows carry one). So the fallback is wired and correct
+-- but contributes nothing until that column is loaded.
+per_stock_row AS (
+    SELECT s.item_code,
+           s.branch,
+           COALESCE(pb.reorder_level, s.reorder_level) AS reorder_level,
+           COALESCE(pb.demand_qty, 0)                  AS demand_qty,
+           pb.lead_days,
+           pb.lead_is_default,
+           (pb.reorder_level IS NOT NULL)              AS is_computed
+    FROM stock AS s
+    LEFT JOIN per_branch AS pb
+           ON pb.item_code = s.item_code
+          AND pb.branch    = s.branch
+)
+SELECT item_code,
+       ROUND(SUM(reorder_level), 3)          AS reorder_level,
+       SUM(demand_qty)                       AS demand_180d,
+       ROUND(AVG(lead_days), 1)              AS avg_lead_days,
+       bool_or(COALESCE(lead_is_default, false)) AS uses_default_lead,
+       COUNT(*) FILTER (WHERE is_computed)   AS branches_with_demand,
+       CASE WHEN bool_or(is_computed) THEN 'computed' ELSE 'stored' END AS source
+FROM per_stock_row
+WHERE reorder_level IS NOT NULL
+GROUP BY item_code;
+
+
+-- ---------------------------------------------------------------------------
+-- v_stock_runway - how long the stock lasts, IN VALUE, per branch
+--
+-- DAYS OF STOCK IS A VALUE CALCULATION, NEVER A QUANTITY ONE:
+--     stock value / (value issued over 12 months / 365)
+--
+-- Quantities cannot be added across items. Stock is held in kg, pieces, litres
+-- and metres, so SUM(available_qty) adds tonnes of scrap to a handful of drill
+-- bits and produces a number with no meaning - and then divides it by another
+-- meaningless number. An answer built that way came back as 41.9 days against
+-- a true 81.2: not a rounding difference, a different universe. Money is the
+-- only measure that adds up across a catalogue.
+--
+-- PER-ITEM days of cover is a different thing and is perfectly sound - one item
+-- has one unit - and lives on v_item_demand_picture.days_of_cover. Use that
+-- when the question names a material; use this when it asks about the company,
+-- a branch, or the stock as a whole.
+--
+-- THE OVERALL FIGURE IS NOT THE AVERAGE OF THESE ROWS. Averaging days across
+-- branches weights a tiny store the same as the main one. Aggregate the money
+-- and divide once:
+--     SELECT SUM(stock_value) / NULLIF(SUM(issued_value_12m) / 365.0, 0)
+--     FROM v_stock_runway
+--
+-- The window matches the inventory dashboard: 365 days back from the LATEST
+-- ISSUANCE IN THE DATA, not from today, so a gap between the last data load
+-- and now cannot silently shorten the runway.
+-- ---------------------------------------------------------------------------
+CREATE OR REPLACE VIEW v_stock_runway AS
+WITH win AS (
+    SELECT (SELECT MAX(from_date) FROM issuance)       AS data_through,
+           (SELECT MAX(from_date) FROM issuance) - 365 AS win_start
+),
+issued AS (
+    SELECT i.item_code,
+           i.branch,
+           SUM(COALESCE(i.total_price, 0)) AS issued_value_12m
+    FROM issuance AS i, win AS w
+    WHERE i.status = 'Issue'
+      AND i.from_date BETWEEN w.win_start AND w.data_through
+    GROUP BY i.item_code, i.branch
+)
+SELECT s.branch,
+       SUM(COALESCE(s.stock_qty_amount, 0))              AS stock_value,
+       SUM(COALESCE(s.available_amount, 0))              AS available_value,
+       COALESCE(SUM(iss.issued_value_12m), 0)            AS issued_value_12m,
+       CASE
+           WHEN COALESCE(SUM(iss.issued_value_12m), 0) <= 0 THEN NULL
+           ELSE ROUND(
+               SUM(COALESCE(s.stock_qty_amount, 0))
+               / (SUM(iss.issued_value_12m) / 365.0), 1)
+       END                                               AS days_of_stock,
+       COUNT(DISTINCT s.item_code)                       AS items,
+       (SELECT data_through FROM win)                    AS data_through
+FROM stock AS s
+LEFT JOIN issued AS iss
+       ON iss.item_code = s.item_code
+      AND iss.branch    = s.branch
+GROUP BY s.branch;
 
 
 -- ---------------------------------------------------------------------------

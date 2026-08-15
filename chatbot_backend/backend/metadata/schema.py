@@ -199,8 +199,19 @@ consignment_items(id PK, consignment_id -> consignments, item_id -> items.id,
 
 eta_revision_history(id PK, consignment_id -> consignments, eta_type,
                      previous_eta, new_eta, cause_of_revision, user_id)
-    One row per ETA change. Slippage = the current eta minus the FIRST
+    One row per ETA change. SLIPPAGE = the current eta minus the FIRST
     previous_eta ever recorded for that consignment.
+
+    SLIPPAGE IS NOT DELAY, and this table is NOT how you answer "how many
+    imports are delayed". Slippage measures how far a promise MOVED; delay
+    measures whether the goods arrived later than they were NEEDED. A
+    consignment whose ETA was revised three times but still reached the works
+    before its required date is not late, and one that never moved its ETA can
+    be months late. Answering the delay question from here returned 82 where
+    the business definition gives 50.
+    For anything about late, delayed, on-time or days late, use
+    v_import_delivery_delay. Use this table only when the question is about ETA
+    CHANGES, revisions, or why a date moved (cause_of_revision).
 
 status_update_history(id PK, consignment_id -> consignments, previous_status,
                       new_status, effective_date, remarks, user_id)
@@ -404,6 +415,84 @@ v_branch_depleted_items(branch, item_code, item_name, branch_rank,
     out_of_stock_company_wide tells you which of them are genuinely out of
     stock as well.
 
+v_item_movement(item_code, item_name, rank, available_qty, stock_value,
+                available_amount, last_issued_on, issued_value_3m,
+                issued_value_12m, movement, data_through)
+    FAST / SLOW / DEAD, one class per stocked item, matching the inventory
+    dashboard exactly (Dead 2,387 / Fast 1,443 / Slow 932):
+      Fast moving  issued within the last 3 months
+      Slow moving  not in 3 months, but issued within 12
+      Dead         not issued in the last 12 months at all
+    Windows end at the latest issuance in the data, not today.
+
+    "DEAD" HERE IS THE MOVEMENT SENSE - has not been issued in a year, nothing
+    more. v_dead_stock is a stricter, different question: it also requires
+    stock on hand and a purchase over a year old, so something bought last
+    month and not yet issued is not called dead. 2,387 vs 1,249 - do not mix
+    them. Use this view for the fast/slow/dead SPLIT, v_dead_stock for money
+    sitting idle.
+
+    Report BOTH count and value: dead items are about half the catalogue but a
+    seventh of the money, and either number alone tells the wrong story.
+
+v_item_reorder_level(item_code, reorder_level, demand_180d, avg_lead_days,
+                     uses_default_lead, branches_with_demand)
+    THE REORDER LEVEL, derived exactly as the inventory dashboard derives it:
+    (demand over the last 180 days / 180) x observed lead time x 1.2, where
+    demand is requisitioned quantity and lead time is the average requisition
+    cycle (stock_in_date - prepare_date). The 1.2 IS the safety policy.
+
+    "How many items are below reorder level" =
+      SELECT COUNT(*) FROM v_item_stock_position p
+      JOIN v_item_reorder_level rl ON rl.item_code = p.item_code
+      WHERE p.available_qty > 0 AND p.available_qty < rl.reorder_level
+    which gives 105, matching the dashboard.
+
+    AN ITEM ABSENT FROM THIS VIEW HAS NO LEVEL, not a level of zero - nothing
+    was requisitioned for it in the window, so it cannot be "below" anything.
+    An item at zero available is OUT OF STOCK, a different question.
+
+v_import_delivery_delay(consignment_id, instrument_number, supplier, origin,
+                        required_date, eta_works, current_status, pkr_total,
+                        days_late, delay_status, within_grace)
+    WHETHER AN IMPORT WAS LATE. days_late = eta_works - required_date;
+    delay_status is 'Delayed' when that exceeds 7 days, 'On time' at 7 or
+    below (including early), and 'Not measurable' when either date is missing.
+    The 7-day grace and the use of eta_works both match the imports dashboard,
+    so the tile and the answer cannot disagree.
+
+    A PERCENTAGE HERE MUST CARRY ITS BASIS. Most consignments are 'Not
+    measurable', so a delay rate is a share of the measurable ones only - say
+    "52.6% of the 95 that can be measured". Never count the unmeasurable ones
+    as on time.
+
+    Average days late is over delay_status = 'Delayed' rows only; early
+    arrivals are not negative delays to net off. days_late is the full lag,
+    not the excess beyond the grace period.
+
+v_stock_runway(branch, stock_value, available_value, issued_value_12m,
+               days_of_stock, items, data_through)
+    HOW LONG THE STOCK LASTS, per branch, computed IN VALUE:
+    stock value / (value issued over 12 months / 365).
+
+    USE THIS for "days of stock", "stock runway", "how long will our stock
+    last" about the COMPANY, a BRANCH, or stock as a whole.
+
+    NEVER compute it from quantities. SUM(available_qty) / (SUM(issued_qty)/365)
+    adds kilograms to pieces to litres - the catalogue is held in four
+    different units - so both halves of that fraction are meaningless. It
+    returned 41.9 days where the true figure is 82.9.
+
+    THE OVERALL NUMBER IS NOT THE AVERAGE OF THE ROWS - averaging days weights
+    a tiny store like the main one. Aggregate the money and divide once:
+      SELECT SUM(stock_value) / NULLIF(SUM(issued_value_12m)/365.0, 0)
+      FROM v_stock_runway
+    days_of_stock is NULL for a branch with no issuance - it has no runway,
+    which is not the same as a long one.
+
+    For ONE NAMED ITEM use v_item_demand_picture.days_of_cover instead: a
+    single item has a single unit, so a quantity-based cover is sound there.
+
 v_dead_stock(item_code, item_name, rank, branch_ranks, branches_held_at,
              available_qty, idle_value, total_value, last_issued_on,
              days_since_issue, ever_issued, last_purchased_on,
@@ -440,6 +529,49 @@ v_item_consumption_monthly(item_code, period, quantity, value, issue_lines)
     The demand signal: issued quantity per item per month, already restricted
     to status 'Issue' (excluding 'Hold' / 'HoldIssuence', which are not
     consumption). Use this for trends, burn rate and forecast series.
+
+=== WHICH DATE TO FILTER ON ===
+
+Picking a date column that looks right but is empty, or that means something
+else, has produced two confidently wrong answers already. Both looked fine.
+
+  ALWAYS EMPTY - a filter on these returns ZERO ROWS, which reads as "nothing
+  happened" rather than "wrong column":
+    consignments.effective_date        NULL on all 178
+    consignments.po_date               NULL on all 178
+  "No shaft imports this month" was produced exactly this way, hiding 24 lines
+  worth PKR 53.6m.
+
+  IMPORTS (consignments) - use eta_works:
+    eta_works              97.8% filled   arrival at the factory. THE default,
+                                          and what the imports dashboard uses.
+    eta / etd              90.4%          port arrival / sailing - different
+                                          questions, not "when did it land"
+    requisition_date       56.2%
+    gd_filing_date         55.6%
+    cargo_readiness_date   41.0%
+
+  EXPORTS / LOGISTICS (logistics_consignments):
+    updated_at            100%   the ROW's own timestamp - the only complete
+                                 date here, and the honest answer to "recorded"
+    created_at            present - when the record was created
+    etd_sailing_date      32.8%  sailing
+    effective_date        24.2%  ARRIVAL. It equals actual_arrival_date on
+                                 every row that has it - it is NOT a "recorded"
+                                 or status-change date, and filtering on it
+                                 silently drops the 76% of rows where it is
+                                 NULL.
+    actual_arrival_date   24.2%  same dates as effective_date
+    port_in_date          24.2%
+    gate_out_date         13.2%
+
+  STORES: issuance.from_date is the issuance date (100%).
+  PURCHASES: purchases_data.purchase is when it landed, required_d when it was
+  needed, po_date when ordered - all filled.
+
+  WHEN A COLUMN IS UNDER ~50% FILLED, SAY SO. A count filtered on a sparse date
+  is a count of the rows that happen to carry it, not of what happened; state
+  the basis or choose a fuller column.
 
 === TWO PATTERNS TO WRITE YOURSELF ===
 
