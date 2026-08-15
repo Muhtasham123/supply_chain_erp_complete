@@ -334,6 +334,44 @@ BUSINESS_TERMS = [
     },
     {
         "term": (
+            "in process / in-process imports / still in process / open "
+            "consignments / not yet arrived / arrived / cancelled / import "
+            "status bucket / how many are in process"
+        ),
+        "meaning": (
+            "Where an import has got to, in the three buckets the imports "
+            "dashboard splits by:\n"
+            "  Arrived     current_status = 'Arrived at Works'  (work done)\n"
+            "  Cancelled   current_status = 'Order Cancelled'   (abandoned)\n"
+            "  In process  EVERYTHING ELSE - In Transit, Under Production, "
+            "Ready Awaiting Sailing, On Road, Under Examination, and any other "
+            "non-terminal status."
+        ),
+        "maps_to": (
+            "v_import_consignments.status_bucket ('In process' / 'Arrived' / "
+            "'Cancelled'), one row per consignment. Current figures: 30 in "
+            "process, 142 arrived, 6 cancelled. For import LINES of a "
+            "particular material, v_import_shafts carries the same "
+            "status_bucket column."
+        ),
+        "notes": (
+            "'IN PROCESS' IS NOT A STATUS VALUE AND MATCHING THE PHRASE FINDS "
+            "NOTHING. No current_status in this data contains the words, so "
+            "current_status ILIKE '%in process%' returns zero rows - and zero "
+            "reads as 'none are in process' while the tile beside it shows 30. "
+            "That exact query answered 'how many shafts are in process' with "
+            "'not available' when the true answer is 47 lines across 9 "
+            "consignments. Filter on status_bucket, never on the phrase.\n"
+            "It is a NEGATIVE definition - not arrived and not cancelled - so "
+            "a new status appearing in the data lands in 'In process' "
+            "automatically, which is the intended behaviour.\n"
+            "Arrived and Cancelled are kept apart deliberately: both are "
+            "terminal, but one is work completed and the other work abandoned. "
+            "Do not merge them into a single 'closed' figure."
+        ),
+    },
+    {
+        "term": (
             "delayed import / late consignment / import delay / delivery delay "
             "/ days late / on-time imports / import on-time rate"
         ),

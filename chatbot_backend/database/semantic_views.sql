@@ -171,6 +171,18 @@ SELECT ci.id,
        (ci.quantity * ci.unit_price * c.exchange_rate) AS line_value_pkr,
 
        c.current_status,
+
+       -- WHERE IT HAS GOT TO, in the three buckets the imports dashboard uses.
+       -- "In process" is EVERYTHING NOT TERMINAL - it is not a status value and
+       -- no status in this data contains the words. Matching the phrase
+       -- literally returns zero rows and reads as "none in process" while the
+       -- tile beside it shows 30.
+       CASE
+           WHEN c.current_status = 'Arrived at Works' THEN 'Arrived'
+           WHEN c.current_status = 'Order Cancelled'  THEN 'Cancelled'
+           ELSE 'In process'
+       END                              AS status_bucket,
+
        c.origin,
 
        -- THE DATE TO FILTER ON IS eta_works (97.8% filled), which is what the
@@ -194,6 +206,50 @@ LEFT JOIN suppliers AS s
 WHERE ci.is_deleted = false
   AND ci.item_name ~* '[[:<:]]forged[[:>:]]'
   AND ci.item_name ~* '[[:<:]]bars?[[:>:]]';
+
+
+-- ---------------------------------------------------------------------------
+-- v_import_consignments - every import, with the dashboard's status bucket
+--
+-- THE THREE BUCKETS, exactly as the imports screen splits them:
+--     Arrived     current_status = 'Arrived at Works'   (work completed)
+--     Cancelled   current_status = 'Order Cancelled'    (work abandoned)
+--     In process  EVERYTHING ELSE
+--
+-- "In process" is a NEGATIVE definition, not a status. There is no status
+-- value containing the words, so `current_status ILIKE '%in process%'` returns
+-- nothing - which is how "how many shafts are in process" came back as "not
+-- available" while the tile showed 30. Filter on status_bucket, never on the
+-- phrase.
+--
+-- Arrived and Cancelled are reported separately on purpose: both are terminal,
+-- but one is work finished and the other work abandoned, and a single "closed"
+-- figure hides the difference.
+-- ---------------------------------------------------------------------------
+CREATE OR REPLACE VIEW v_import_consignments AS
+SELECT c.id                                   AS consignment_id,
+       c.instrument_number,
+       s.name                                 AS supplier,
+       c.origin,
+       c.current_status,
+       CASE
+           WHEN c.current_status = 'Arrived at Works' THEN 'Arrived'
+           WHEN c.current_status = 'Order Cancelled'  THEN 'Cancelled'
+           ELSE 'In process'
+       END                                    AS status_bucket,
+       c.mode_of_shipment,
+       c.consignment_type,
+       c.currency,
+       c.exchange_rate,
+       c.foreign_total,
+       c.pkr_total,
+       c.required_date,
+       c.eta_works,
+       c.eta,
+       c.etd
+FROM consignments AS c
+LEFT JOIN suppliers AS s ON s.id = c.supplier_id
+WHERE c.is_deleted = false;
 
 
 -- ---------------------------------------------------------------------------

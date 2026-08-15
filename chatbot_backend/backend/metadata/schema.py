@@ -456,6 +456,20 @@ v_item_reorder_level(item_code, reorder_level, demand_180d, avg_lead_days,
     was requisitioned for it in the window, so it cannot be "below" anything.
     An item at zero available is OUT OF STOCK, a different question.
 
+v_import_consignments(consignment_id, instrument_number, supplier, origin,
+                      current_status, status_bucket, mode_of_shipment,
+                      consignment_type, currency, exchange_rate, foreign_total,
+                      pkr_total, required_date, eta_works, eta, etd)
+    EVERY IMPORT, with the dashboard's status bucket: 'In process' (30),
+    'Arrived' (142), 'Cancelled' (6).
+
+    "IN PROCESS" IS NOT A STATUS VALUE - it is everything that is NOT
+    'Arrived at Works' and NOT 'Order Cancelled'. No status in this data
+    contains the words, so `current_status ILIKE '%in process%'` returns zero
+    rows and reads as "none", while the tile shows 30. ALWAYS filter on
+    status_bucket. v_import_shafts carries the same column for line-level
+    questions about a material.
+
 v_import_delivery_delay(consignment_id, instrument_number, supplier, origin,
                         required_date, eta_works, current_status, pkr_total,
                         days_late, delay_status, within_grace)
