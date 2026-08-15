@@ -752,12 +752,17 @@ WITH win AS (
            (SELECT MAX(from_date) FROM issuance) - 365 AS win_start
 ),
 issued AS (
+    -- EVERY STATUS COUNTS, as on the inventory dashboard, so the runway here
+    -- and the tile there cannot disagree. This is the second of the two places
+    -- in this file that treat Hold and HoldIssuence as movement (the other is
+    -- v_item_movement); v_item_consumption_monthly still counts 'Issue' alone,
+    -- because a reservation is not consumption when measuring a burn RATE.
+    -- The difference is 93m of reservations, and 81.2 days against 82.9.
     SELECT i.item_code,
            i.branch,
            SUM(COALESCE(i.total_price, 0)) AS issued_value_12m
     FROM issuance AS i, win AS w
-    WHERE i.status = 'Issue'
-      AND i.from_date BETWEEN w.win_start AND w.data_through
+    WHERE i.from_date BETWEEN w.win_start AND w.data_through
     GROUP BY i.item_code, i.branch
 )
 SELECT s.branch,

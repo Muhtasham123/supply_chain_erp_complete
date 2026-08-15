@@ -394,7 +394,7 @@ BUSINESS_TERMS = [
             "held in kg, pieces, litres and metres, so SUM(available_qty) adds "
             "tonnes of scrap to a handful of drill bits, and dividing one such "
             "sum by another compounds it. Computed that way the answer came "
-            "back as 41.9 days against a true 82.9 - not a rounding "
+            "back as 41.9 days against a true 81.2 - not a rounding "
             "difference. Money is the only measure that adds across a "
             "catalogue, which is why quantity totals were removed from the "
             "inventory dashboard as well.\n"

@@ -485,7 +485,7 @@ v_stock_runway(branch, stock_value, available_value, issued_value_12m,
     NEVER compute it from quantities. SUM(available_qty) / (SUM(issued_qty)/365)
     adds kilograms to pieces to litres - the catalogue is held in four
     different units - so both halves of that fraction are meaningless. It
-    returned 41.9 days where the true figure is 82.9.
+    returned 41.9 days where the true figure is 81.2.
 
     THE OVERALL NUMBER IS NOT THE AVERAGE OF THE ROWS - averaging days weights
     a tiny store like the main one. Aggregate the money and divide once:
