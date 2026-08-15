@@ -31,10 +31,11 @@ from app.reports.helpers import SHAFT_ITEMS
 from app.dashboard.references import clamp, paginate, sql_search_clause
 from app.enums import Status
 from app.dashboard.whole.helpers import (
-    CONSIGNMENT_VALUE, TERMINAL_STATUSES, shaft_consignment_ids, line_date_column,
-    imports_date_column, purchases_date_column,
+    CONSIGNMENT_VALUE, TERMINAL_STATUSES, shaft_consignment_ids,
+    purchases_date_column,
     TRUCKING_DATE_FIELDS, LOGISTICS_DATE_DEFAULT,
-    _live_consignments,
+    _live_consignments, dead_item_ids,
+    _imports_window_membership,
 )
 
 # These lists are COMPLETE — `total` is always the true count and the caller can
@@ -118,9 +119,13 @@ def imports_value_references(db, date_from, date_to, date_field=None,
     tile reading 1 consignment over a list of 7, because the tile was filtered
     and its list was not.
     """
-    # Dated on the LINE, exactly as the tile is — otherwise the list hands back
-    # a consignment's July rows under an August figure.
-    conditions = [line_date_column(date_field).between(date_from, date_to)]
+    # MEMBERSHIP is by line (any line dated inside the window, header
+    # fallback), exactly as the tile is (helpers.imports_period_value /
+    # _imports_window_membership) — otherwise the list would hand back a
+    # different set of consignments than the ones the tile's total was built
+    # from. Every line of a qualifying consignment is still shown (never
+    # hidden), just not gated by each line's OWN date the way this used to be.
+    conditions = [_imports_window_membership(date_field, date_from, date_to)]
     if shafts_only:
         conditions.append(Consignment.id.in_(shaft_consignment_ids()))
 
@@ -137,7 +142,7 @@ def imports_in_process_references(db, date_from=None, date_to=None, date_field=N
     """
     conditions = [Consignment.current_status.notin_(TERMINAL_STATUSES)]
     if date_from is not None and date_to is not None:
-        conditions.append(imports_date_column(date_field).between(date_from, date_to))
+        conditions.append(_imports_window_membership(date_field, date_from, date_to))
     if shafts_only:
         conditions.append(Consignment.id.in_(shaft_consignment_ids()))
 
@@ -441,31 +446,20 @@ def stock_value_references(db, page=None, page_size=None, search=None):
 def dead_stock_references(db, threshold_days, page=None, page_size=None, search=None):
     """The items behind the dead-stock value.
 
-    Same definition as helpers.dead_stock — still carrying value, nothing issued
-    against it within the threshold, measured back from the LATEST issuance in
-    the data rather than from today (the data is historical).
+    Same definition as helpers.dead_stock — built on the identical
+    helpers.dead_item_ids subquery, so the tile and this list can never
+    disagree about which items are dead (they used to: this used to filter
+    RAW per-branch stock rows rather than the folded, purchase-aware set the
+    tile actually counts).
     """
     latest = db.execute(select(func.max(Issuance.from_date))).scalar()
     if latest is None:
         return paginate([], page, page_size)
 
-    # NOT EXISTS rather than NOT IN: the issuance table is the largest thing on
-    # this screen, and a correlated existence check stops at the first match per
-    # item instead of building the whole distinct set first (0.6s -> 0.05s).
     cutoff = latest - timedelta(days=threshold_days)
-    recently_issued = (
-        select(1)
-        .where(Issuance.item_code == Stock.item_code)
-        .where(Issuance.from_date > cutoff)
-        .correlate(Stock)
-        .exists()
-    )
+    dead = dead_item_ids(db, cutoff)
 
-    conditions = [
-        Stock.item_code.isnot(None),
-        ~recently_issued,
-        Stock.stock_qty_amount > 0,
-    ]
+    conditions = [Stock.item_code.in_(select(dead.c.item_code))]
     total = db.execute(
         select(func.count(func.distinct(Stock.item_code))).where(*conditions)
     ).scalar()
@@ -486,7 +480,7 @@ def imports_status_references(db, bucket, date_from=None, date_to=None,
 
     conditions = [Consignment.current_status == status]
     if date_from is not None and date_to is not None:
-        conditions.append(imports_date_column(date_field).between(date_from, date_to))
+        conditions.append(_imports_window_membership(date_field, date_from, date_to))
     if shafts_only:
         conditions.append(Consignment.id.in_(shaft_consignment_ids()))
 
@@ -511,7 +505,7 @@ def imports_delayed_references(db, date_from=None, date_to=None, date_field=None
         days_late > DELAY_GRACE_DAYS,
     ]
     if date_from is not None and date_to is not None:
-        conditions.append(imports_date_column(date_field).between(date_from, date_to))
+        conditions.append(_imports_window_membership(date_field, date_from, date_to))
     if shafts_only:
         conditions.append(Consignment.id.in_(shaft_consignment_ids()))
 
