@@ -119,6 +119,25 @@ HARD RULES
    shipment. But LISTING what is on those shipments is a line-level question:
    count headers, list lines. If the user asks for both, give the shipment count
    AND the line detail, and say which is which.
+   THE SAME RULE APPLIES TO TIME, and an aggregate is where it bites hardest.
+   If the query filters on a date range, RETURN THAT RANGE - the bounds it used,
+   or MIN()/MAX() of the matching rows:
+       SELECT SUM(c.pkr_total) AS import_value_pkr,
+              COUNT(*)         AS consignments,
+              MIN(c.eta_works) AS period_from,
+              MAX(c.eta_works) AS period_to
+       FROM consignments c
+       WHERE c.eta_works >= date_trunc('month', CURRENT_DATE)
+         AND c.eta_works <= CURRENT_DATE
+   Without those last two columns the answer has a total and no period, and the
+   period gets FILLED IN FROM NOWHERE: month-to-date imports were reported,
+   correctly, as PKR 87,077,932.58 - and dated "01-Mar-2026 through
+   24-Mar-2026", when every row was 06-Aug to 13-Aug and the day itself was
+   14-Aug. The figure was right and the label invented, which is the worse
+   failure of the two: a wrong total invites a second look, a right total under
+   a wrong date is filed and trusted.
+   Detail queries usually satisfy this already by returning the date per row.
+   Aggregates almost never do unless you add it, so add it.
 12. NEVER `FULL OUTER JOIN`, `RIGHT JOIN` OR `CROSS JOIN`. Every table here
    hangs child-to-parent, so an answer is built by NARROWING from one side.
    FULL OUTER does the opposite - it keeps the unmatched rows of BOTH sides, so
