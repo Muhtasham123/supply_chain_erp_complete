@@ -290,8 +290,11 @@ BUSINESS_TERMS = [
     },
     {
         "term": (
-            "fast moving / slow moving / dead items / movement / movement "
-            "split / which items are moving"
+            "dead items / dead stock / how many dead items / how many dead "
+            "stock items / dead item count / dead stock value / how much is "
+            "stuck in dead stock / what is our dead stock worth / non-moving "
+            "stock / stock not moving / fast moving / slow moving / movement "
+            "/ movement split / which items are moving"
         ),
         "meaning": (
             "How recently a stocked item has been issued:\n"
@@ -405,14 +408,26 @@ BUSINESS_TERMS = [
     },
     {
         "term": (
-            "dead stock / deadstock / non-moving stock / idle stock / "
-            "stock not moving / stuck inventory / what is not selling"
+            "dead stock ageing / which items are dead / how long has it been "
+            "sitting / days since last issue / write-off candidates / "
+            "dead stock detail"
         ),
         "meaning": (
-            "Stock the company is holding that has not moved in a year, and "
-            "has had a year in which it could have. Three conditions together: "
-            "available_qty above zero, no issuance in the last 365 days, and a "
-            "last purchase more than 365 days ago."
+            "THE ITEM-BY-ITEM DETAIL BEHIND DEAD STOCK - which things are "
+            "sitting, how long since each was issued, how long since it was "
+            "bought, and what to do with it. Stock held that has not moved in "
+            "a year and had a year in which it could have: available_qty above "
+            "zero, no issuance in the last 365 days, last purchase over 365 "
+            "days ago.\n"
+            "THE HEADLINE COUNT AND VALUE ARE NOT FROM HERE. 'How many dead "
+            "items', 'how many dead stock items', 'what is our dead stock "
+            "worth', 'how much is stuck in dead stock' - all of those are "
+            "v_item_movement, which gives 1,269 items and PKR 71,477,136 and "
+            "matches the dashboard tile. This view is a slightly stricter set "
+            "(1,249) and its idle_value is the unreserved figure (57.7m), so "
+            "quoting either as THE number puts a different figure on screen "
+            "from the one beside it. Use this view to LIST and EXPLAIN, not to "
+            "total."
         ),
         "maps_to": (
             "SELECT FROM v_dead_stock. It IS the definition; never rebuild it "
