@@ -320,13 +320,21 @@ def load_learned() -> List[Dict[str, Any]]:
     still knows the accepted terms instead of starting blank.
     """
     path = _learned_path()
+
+    # MISSING, EMPTY AND CORRUPT ALL FALL BACK TO THE SEED. Only checking
+    # exists() was not enough: the live file was found at zero bytes, which
+    # parses as nothing and silently returned no vocabulary at all - the
+    # curated terms were gone with no error anywhere. A file that cannot be
+    # read is the same situation as a file that is not there.
+    live = _read_terms_file(path)
+    if live:
+        return live
+    return _read_terms_file(path.with_name("learned_terms.seed.json"))
+
+
+def _read_terms_file(path) -> List[Dict[str, Any]]:
+    """Parse a learned-terms file, or return [] if it is absent or unusable."""
     if not path.exists():
-        seed = path.with_name("learned_terms.seed.json")
-        if seed.exists():
-            try:
-                return json.loads(seed.read_text(encoding="utf-8")) or []
-            except (json.JSONDecodeError, OSError):
-                return []
         return []
     try:
         return json.loads(path.read_text(encoding="utf-8")) or []
