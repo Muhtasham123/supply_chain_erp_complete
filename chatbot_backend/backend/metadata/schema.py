@@ -417,23 +417,27 @@ v_branch_depleted_items(branch, item_code, item_name, branch_rank,
 
 v_item_movement(item_code, item_name, rank, available_qty, stock_value,
                 available_amount, last_issued_on, issued_value_3m,
-                issued_value_12m, movement, data_through)
-    FAST / SLOW / DEAD, one class per stocked item, matching the inventory
-    dashboard exactly (Dead 2,387 / Fast 1,443 / Slow 932):
-      Fast moving  issued within the last 3 months
-      Slow moving  not in 3 months, but issued within 12
-      Dead         not issued in the last 12 months at all
-    Windows end at the latest issuance in the data, not today.
+                issued_value_12m, last_purchased_on, movement, data_through)
+    FAST / SLOW / DEAD, matching the inventory dashboard exactly:
+      Fast moving  1,535 items, PKR 765,732,001   issued within 3 months
+      Slow moving  1,011 items, PKR  97,279,118   not in 3, but within 12
+      Dead         1,269 items, PKR  71,477,136   neither, and still on a shelf
+    Windows end at the latest issuance in the data, not today, and issuance is
+    counted company-wide.
 
-    "DEAD" HERE IS THE MOVEMENT SENSE - has not been issued in a year, nothing
-    more. v_dead_stock is a stricter, different question: it also requires
-    stock on hand and a purchase over a year old, so something bought last
-    month and not yet issued is not called dead. 2,387 vs 1,249 - do not mix
-    them. Use this view for the fast/slow/dead SPLIT, v_dead_stock for money
-    sitting idle.
+    MOVEMENT IS NULL FOR 947 ITEMS, and that is deliberate, not missing data:
+    an item with nothing available (depleted or fully on hold) has no stock
+    sitting idle, and one purchased within the last 12 months has not had time
+    to move. Neither is Dead. Exclude NULLs when reporting the split - they
+    belong to no class - and never fold them into Dead.
 
-    Report BOTH count and value: dead items are about half the catalogue but a
-    seventh of the money, and either number alone tells the wrong story.
+    Report BOTH count and value. Dead is a quarter of the catalogue but under a
+    tenth of the money; either number alone tells the wrong story.
+
+    v_dead_stock answers nearly the same question by a slightly different route
+    (1,249 items) and carries the days-since-issue and days-since-purchase
+    detail. Use THIS view for the split and to match the dashboard tile; use
+    that one when the question is about the idle money itself.
 
 v_item_reorder_level(item_code, reorder_level, demand_180d, avg_lead_days,
                      uses_default_lead, branches_with_demand)

@@ -527,20 +527,28 @@ WHERE pos.available_qty > 0
 -- give different counts; use this view when the question is about the fast /
 -- slow / dead SPLIT, and v_dead_stock when it is about money sitting idle.
 -- ---------------------------------------------------------------------------
--- TWO DETAILS THAT DECIDE THE NUMBERS, both taken from the dashboard so the
--- split matches it exactly (Dead 2,387 / Fast 1,443 / Slow 932):
+-- THREE RULES DECIDE THE NUMBERS, all taken from the dashboard so the split
+-- matches it exactly (Fast 1,535 / Slow 1,011 / Dead 1,269):
 --
---  * ISSUANCE COUNTS ONLY WHERE THE BRANCH STOCKS THE ITEM. Issuance is keyed
---    by item AND branch and joined to the stock rows; material issued at a
---    site that does not hold the item does not make it "moving" there. Ignore
---    this and 2,387 becomes 2,181.
+--  * ISSUANCE IS COUNTED COMPANY-WIDE, per item, across every branch that
+--    issued it - not only the branches the stock snapshot still lists. An item
+--    issued at a site that no longer holds a stock row is still moving.
 --
---  * EVERY ISSUANCE STATUS COUNTS HERE, not just 'Issue'. That is the
---    dashboard's rule and it is the ONE PLACE in this file where Hold and
---    HoldIssuence are treated as movement - v_item_consumption_monthly and
---    v_stock_runway both count 'Issue' alone, because a reservation is not
---    consumption. Kept deliberately so the tile and the answer agree; on
---    'Issue' alone this split would read 2,403 / 1,395 / 964.
+--  * NOTHING AVAILABLE MEANS UNCLASSIFIED, NOT DEAD. An item fully depleted or
+--    fully on hold has no stock sitting idle, so it is left out of the split
+--    (movement NULL) rather than counted as Dead. Dead is money on a shelf.
+--
+--  * A RECENT PURCHASE BUYS TIME. Bought within the last 12 months and not yet
+--    issued is new, not dead - the same benefit of the doubt v_dead_stock
+--    gives. Purchase dates come from purchases_data.purchase for the four
+--    branch codes that map onto stock branches, and any one of them inside the
+--    window is enough.
+--
+--  EVERY ISSUANCE STATUS COUNTS HERE, not just 'Issue'. That is the
+--  dashboard's rule and the ONE PLACE in this file where Hold and
+--  HoldIssuence are treated as movement - v_item_consumption_monthly and
+--  v_stock_runway both count 'Issue' alone, because a reservation is not
+--  consumption.
 CREATE OR REPLACE VIEW v_item_movement AS
 WITH win AS (
     SELECT MAX(from_date)       AS data_through,
@@ -550,7 +558,6 @@ WITH win AS (
 ),
 activity AS (
     SELECT i.item_code,
-           i.branch,
            MAX(i.from_date) AS last_issued_on,
            SUM(COALESCE(i.total_price, 0))
              FILTER (WHERE i.from_date >= (SELECT from_3m FROM win))  AS issued_value_3m,
@@ -558,36 +565,38 @@ activity AS (
              FILTER (WHERE i.from_date >= (SELECT from_12m FROM win)) AS issued_value_12m
     FROM issuance AS i, win AS w
     WHERE i.from_date BETWEEN w.from_12m AND w.data_through
-    GROUP BY i.item_code, i.branch
+    GROUP BY i.item_code
 ),
-per_item AS (
-    SELECT s.item_code,
-           MAX(a.last_issued_on)                  AS last_issued_on,
-           SUM(COALESCE(a.issued_value_3m, 0))    AS issued_value_3m,
-           SUM(COALESCE(a.issued_value_12m, 0))   AS issued_value_12m
-    FROM stock AS s
-    LEFT JOIN activity AS a
-           ON a.item_code = s.item_code
-          AND a.branch    = s.branch
-    GROUP BY s.item_code
+recent_buy AS (
+    SELECT p.item_code,
+           MAX(p.purchase) AS last_purchased_on
+    FROM purchases_data AS p
+    WHERE p.item_code IS NOT NULL
+      AND p.branch IN ('QCL', 'QE', 'QEN', 'QB2')
+    GROUP BY p.item_code
 )
-SELECT p.item_code,
-       p.item_name,
-       p.rank,
-       p.available_qty,
-       p.stock_amount                 AS stock_value,
-       p.available_amount,
-       m.last_issued_on,
-       m.issued_value_3m,
-       m.issued_value_12m,
+SELECT pos.item_code,
+       pos.item_name,
+       pos.rank,
+       pos.available_qty,
+       pos.stock_amount                        AS stock_value,
+       pos.available_amount,
+       a.last_issued_on,
+       COALESCE(a.issued_value_3m, 0)          AS issued_value_3m,
+       COALESCE(a.issued_value_12m, 0)         AS issued_value_12m,
+       rb.last_purchased_on,
        CASE
-           WHEN m.issued_value_3m  > 0 THEN 'Fast moving'
-           WHEN m.issued_value_12m > 0 THEN 'Slow moving'
+           WHEN COALESCE(a.issued_value_3m, 0)  > 0 THEN 'Fast moving'
+           WHEN COALESCE(a.issued_value_12m, 0) > 0 THEN 'Slow moving'
+           WHEN pos.available_qty <= 0              THEN NULL
+           WHEN rb.last_purchased_on IS NOT NULL
+                AND rb.last_purchased_on >= (SELECT from_12m FROM win) THEN NULL
            ELSE 'Dead'
-       END                            AS movement,
-       (SELECT data_through FROM win) AS data_through
-FROM v_item_stock_position AS p
-JOIN per_item AS m ON m.item_code = p.item_code;
+       END                                     AS movement,
+       (SELECT data_through FROM win)          AS data_through
+FROM v_item_stock_position AS pos
+LEFT JOIN activity   AS a  ON a.item_code  = pos.item_code
+LEFT JOIN recent_buy AS rb ON rb.item_code = pos.item_code;
 
 
 -- ---------------------------------------------------------------------------
